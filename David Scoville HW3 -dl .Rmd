@@ -1,0 +1,197 @@
+David Scoville - HW3
+========================================================
+
+Step 1: Load necessary packages
+```{r}
+library(knitr)
+library(data.table)
+library(ggplot2)
+library(limma)
+library(edgeR)
+library(GEOquery)
+
+```
+
+Step2: grab the necessary GEO file
+```{r}
+
+gd <- getGEO("GSE45735",dest.dir<-"/Data/GEO")
+
+pd <- pData(gd[[1]])
+
+```
+
+
+Step 3: Get the supplemental data files - Note that T14 file must have some rows deleted from the bottom and must either rezipped or change the following script to grap .txt files, not .gz files
+
+- there is no way to make this script just "Run". You either have to run everything up to this step, then manually fix the file and run the next step or assume the person has already downloaded and fixed the files and you ignore this step entirely and move on to listing the files in the next code chunk. I have chosen the latter for HW3 because Dr. Gottardo will already have these files. I have left the code if they have not been downloaded and it is just not evaluated.
+
+```{r eval=FALSE}
+
+
+getGEOSuppFiles("GSE45735", makeDirectory=FALSE, baseDir = "/Data/GEO/")
+
+```
+
+Make a list of the supplemental file names
+```{r}
+###files <- list.files(path = "/Users/dkscov/Documents/UW/Winter 2014/Biostat-578/Data/GEO/GSE45735", pattern = "GSE45735_T.*.gz", full.names = TRUE)
+
+files <- list.files(path = "/Data/GEO", pattern = "GSE45735_T.*.gz", full.names = TRUE)
+
+file_list <- lapply(files, read.table, header=TRUE)
+
+```
+
+Remove duplicate rows in the files
+```{r}
+file_list_unique <- lapply(file_list, function(x){x<-x[!duplicated(x$Gene),]; 
+x <- x[order(x$Gene),]; rownames(x) <- x$Gene; x[,-1]})
+
+```
+
+Find the intersections of the genes
+```{r}
+gene_list <- Reduce(intersect, lapply(file_list_unique, rownames))
+file_list_unique <- lapply(file_list_unique, "[", gene_list,)
+matrix <- as.matrix(do.call(cbind, file_list_unique))
+```
+
+Clean up pData and add to the matrix
+```{r}
+pd_small <- pd[!grepl("T13_Day8",pd$title),]
+pd_small$Day <- sapply(strsplit(gsub(" \\[PBMC\\]", "", pd_small$title),"_"),"[",2)
+pd_small$subject <- sapply(strsplit(gsub(" \\[PBMC\\]", "", pd_small$title),"_"),"[",1)
+colnames(matrix) <- rownames(pd_small)
+```
+
+Install Sradb from bioconductor to access metadata
+```{r}
+source("http://bioconductor.org/biocLite.R")
+biocLite("SRAdb")
+```
+
+Make an eSet object of the matrix of gene information
+```{r}
+new_set <- ExpressionSet(assayData = matrix+1)
+pData(new_set) <- pd_small
+```
+
+Make a model matrix for LIMMA and run lmFit and eBayes to get the fold change and p-values for the different genes at the different timepoints
+```{r}
+design <- model.matrix(~subject+Day, new_set)
+new_set_voom <- voom(new_set,design = design)
+lm <- lmFit(new_set_voom, design)
+eb <- eBayes(lm)
+
+```
+
+
+Make top tables for each day. Then determine which days have differentially expressed genes.
+
+
+
+```{r}
+num.days<-unique(pData(new_set)$Day)[2:11]
+daylist<-vector(mode="list",length=length(num.days))
+
+daylist.diff<-NULL
+
+for (i in 1:length(num.days)) {
+
+tt.tmp<-topTable(eb, coef = paste("Day",num.days[i],sep=""),number= Inf,sort.by="none")
+  
+daylist[[i]]<-tt.tmp 
+  
+tt.tmp.sig<- tt.tmp[which(tt.tmp$adj.P.Val<0.01),]
+ 
+if (dim(tt.tmp.sig)[1]>0) {
+   
+  daylist.diff<-c(daylist.diff,i)
+   
+   
+ }
+
+}
+
+```
+
+Determine the number of differentially expressed genes and create a matrix that has ten columns (one per day) and as many rows as there are total differentially expressed genes. Fill the columns the logFC values of the differentially expressed genes for each day.
+
+```{r}
+diff.exprs.index<-NULL
+#getting the row indeces of all differntially expressed genes from all 10 top tables.
+for (i in 1:10) {
+diff.exprs.index<-c(diff.exprs.index,which(daylist[[i]]$adj.P.Val<0.01))                  
+}
+# Make a matrix with 10 columns (one per day) and with the same number of rows as the length of the row indices vector for all differentially expressed genes.
+
+fc.sig.alldays<-matrix(0,nrow=length(diff.exprs.index),ncol=10)
+
+# fill the matrix columns with the logFC values from the list of differentially expressed genes from each of the days.
+for (i in 1:10) {
+fc.sig.alldays[,i]<-daylist[[i]][sort(diff.exprs.index),"logFC"]            
+}
+colnames(fc.sig.alldays)<-num.days
+rownames(fc.sig.alldays)<-rownames(daylist[[1]][which(daylist[[1]]$adj.P.Val<0.01 | daylist[[3]]$adj.P.Val<0.01),])
+
+```
+
+Load the pHeatmap package and create a heatmap of logFC of all differentially expressed genes grouped by day.
+```{r}
+library(pheatmap)
+
+pheatmap(fc.sig.alldays,show_rownames=T)
+```
+
+HW3 part 2: do a gene set enrichment analysis and make a heatmap grouped by day
+
+```{r}
+#download the following file from the broad insititute: c2.all.v4.0.symbols.gmt
+# and read in the gene sets for GSEA analysis - 
+
+c2_set <- getGmt("GSEA-sets/c2.all.v4.0.symbols.gmt")
+
+gene_ids <- geneIds(c2_set)
+# convert to indices because Camera requires gene-indices
+sets_indices <- symbols2indices(gene_ids, rownames(new_set))
+
+
+```
+Specify contrasts - we are using the same LIMMA and voom models from HW3 part I
+
+```{r}
+cont_matrix <- makeContrasts("DayDay1", levels=design)
+res <- camera(new_set_voom, sets_indices, design=design, cont_matrix)
+res[1:10, ]
+```
+
+Find the enriched gene sets over time
+```{r}
+res <- vector("list",length = 10)
+for(i in 1:10)
+  {
+  contrast <- paste0("DayDay",i)
+  cont_matrix <- makeContrasts(contrast, levels=design)
+  res[[i]] <- camera(new_set_voom, sets_indices, design=design, contrast=cont_matrix, sort=FALSE)
+}
+```
+create a heatmap to vizualize the categories:
+
+```{r}
+
+library(pheatmap)
+PValue <- sapply(res, function(x){ifelse(x$Direction=="Up", -10*log10(x$PValue), 10*log10(x$PValue))})
+rownames(PValue) <- rownames(res[[1]])
+PValue_max <- rowMax(abs(PValue))
+PValue_small <- PValue[PValue_max>30, ]
+anno <- data.frame(Time=paste0("Day",1:10))
+rownames(anno) <- colnames(PValue_small)  <- paste0("Day",1:10)
+pheatmap(PValue_small, cluster_cols=FALSE)
+
+```
+
+
+
+
+
